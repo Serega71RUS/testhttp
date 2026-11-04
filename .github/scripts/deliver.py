@@ -1,5 +1,6 @@
 """Deliver only trusted develop/main pushes; never execute for pull requests."""
 import copy
+import base64
 import json
 import os
 from pathlib import Path
@@ -34,6 +35,9 @@ def request_json(url, body=None, headers=None):
             raw = response.read()
             return json.loads(raw) if raw else {}
     except urllib.error.HTTPError as error:
+        if error.code == 400 and url.endswith('/v1/auth/github/login'):
+            details = json.loads(error.read()).get('errors', [])
+            raise RuntimeError('Vault identity rejected: ' + '; '.join(str(item)[:300] for item in details)) from None
         raise RuntimeError('Identity/secret request failed, HTTP ' + str(error.code)) from None
 
 
@@ -45,7 +49,13 @@ def fetch_vault_credentials(branch):
     url += ('&' if '?' in url else '?') + urllib.parse.urlencode({'audience':'vault'})
     jwt = request_json(url, headers={'Authorization':'Bearer ' + os.environ['ACTIONS_ID_TOKEN_REQUEST_TOKEN']})['value']
     mask(jwt)
-    login = request_json(vault+'/v1/auth/github/login', {'role':'testhttp-'+branch, 'jwt':jwt})
+    try:
+        login = request_json(vault+'/v1/auth/github/login', {'role':'testhttp-'+branch, 'jwt':jwt})
+    except RuntimeError:
+        claims = json.loads(base64.urlsafe_b64decode(jwt.split('.')[1] + '==='))
+        public_claims = ('sub', 'aud', 'repository_id', 'repository_owner_id', 'ref', 'workflow_ref', 'event_name')
+        print('OIDC identity metadata:', json.dumps({name:claims.get(name) for name in public_claims}), flush=True)
+        raise
     token = login['auth']['client_token']
     mask(token)
     headers = {'X-Vault-Token':token}
