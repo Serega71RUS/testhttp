@@ -1,6 +1,7 @@
 """Deliver only trusted develop/main pushes; never execute for pull requests."""
 import copy
 import base64
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -78,6 +79,18 @@ def run(args, **kwargs):
 
 def output(args, **kwargs):
     return subprocess.check_output(args, text=True, **kwargs).strip()
+
+
+def github_git_address(metadata):
+    # Home DNS can return a web endpoint which rejects SSH deploy keys.
+    answer = request_json('https://dns.google/resolve?name=github.com&type=A')
+    networks = [ipaddress.ip_network(value) for value in metadata['git']]
+    for record in answer.get('Answer', []):
+        if record.get('type') == 1:
+            address = ipaddress.ip_address(record['data'])
+            if address.version == 4 and any(address in network for network in networks if network.version == 4):
+                return str(address)
+    raise RuntimeError('No GitHub Git IPv4 address verified against official metadata')
 
 
 def require_promotion(release, source_tree):
@@ -179,11 +192,13 @@ def main():
         key.write_text(os.environ['INFRA_SSH_KEY'].rstrip()+'\n')
         key.chmod(0o600)
         with urllib.request.urlopen('https://api.github.com/meta', timeout=20) as response:
-            github_keys = json.load(response)['ssh_keys']
+            github_metadata = json.load(response)
+        github_keys = github_metadata['ssh_keys']
+        github_address = github_git_address(github_metadata)
         known_hosts = temporary/'known_hosts'
         known_hosts.write_text(''.join('github.com '+key+'\n' for key in github_keys))
         env = os.environ.copy()
-        env['GIT_SSH_COMMAND'] = f'ssh -i {key} -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile={known_hosts}'
+        env['GIT_SSH_COMMAND'] = f'ssh -i {key} -o HostName={github_address} -o HostKeyAlias=github.com -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile={known_hosts}'
         env['DOCKER_CONFIG'] = str(temporary/'docker')
         infra = temporary/'infra'
         run(['git', 'clone', '--depth=1', INFRA, str(infra)], env=env)
