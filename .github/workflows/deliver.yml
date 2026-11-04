@@ -1,0 +1,32 @@
+name: Test and deliver
+
+on:
+  push:
+    branches: [develop, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: testhttp-delivery
+  cancel-in-progress: false
+
+jobs:
+  deliver:
+    if: >-
+      github.repository == 'Serega71RUS/testhttp' &&
+      (github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main') &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: [self-hosted, Linux, X64, testhttp]
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Build develop or promote tested image to production
+        env:
+          VAULT_ADDR: https://vault.apps.okd.lab.home.arpa
+          PYTHONUNBUFFERED: '1'
+        run: python3 .github/scripts/deliver.py
