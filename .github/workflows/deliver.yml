@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: read
+  id-token: write
 
 concurrency:
   group: testhttp-delivery
@@ -26,8 +27,6 @@ jobs:
           persist-credentials: false
       - name: Build develop or promote tested image to production
         env:
-          REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
-          INFRA_SSH_KEY: ${{ secrets.INFRA_SSH_KEY }}
-          ARGO_READ_TOKEN: ${{ secrets.ARGO_READ_TOKEN }}
+          VAULT_ADDR: https://vault.apps.okd.lab.home.arpa
           PYTHONUNBUFFERED: '1'
         run: python3 .github/scripts/deliver.py

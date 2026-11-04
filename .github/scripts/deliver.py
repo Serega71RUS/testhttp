@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 import yaml
@@ -16,6 +17,49 @@ REGISTRY = 'registry.apps.okd.lab.home.arpa'
 INTERNAL_IMAGE = 'image-registry.openshift-image-registry.svc:5000/images/testhttp'
 ARGO = 'https://argocd.apps.okd.lab.home.arpa'
 INFRA = 'git@github.com:Serega71RUS/homelab-infra.git'
+
+
+def mask(value):
+    escaped = value.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+    print('::add-mask::' + escaped, flush=True)
+
+
+def request_json(url, body=None, headers=None):
+    headers = dict(headers or {})
+    if body is not None:
+        headers['Content-Type'] = 'application/json'
+    request = urllib.request.Request(url, json.dumps(body).encode() if body is not None else None, headers)
+    try:
+        with urllib.request.urlopen(request, timeout=25) as response:
+            raw = response.read()
+            return json.loads(raw) if raw else {}
+    except urllib.error.HTTPError as error:
+        raise RuntimeError('Identity/secret request failed, HTTP ' + str(error.code)) from None
+
+
+def fetch_vault_credentials(branch):
+    vault = os.environ.get('VAULT_ADDR', '').rstrip('/')
+    if vault != 'https://vault.apps.okd.lab.home.arpa':
+        raise RuntimeError('Unexpected Vault address')
+    url = os.environ['ACTIONS_ID_TOKEN_REQUEST_URL']
+    url += ('&' if '?' in url else '?') + urllib.parse.urlencode({'audience':'vault'})
+    jwt = request_json(url, headers={'Authorization':'Bearer ' + os.environ['ACTIONS_ID_TOKEN_REQUEST_TOKEN']})['value']
+    mask(jwt)
+    login = request_json(vault+'/v1/auth/github/login', {'role':'testhttp-'+branch, 'jwt':jwt})
+    token = login['auth']['client_token']
+    mask(token)
+    headers = {'X-Vault-Token':token}
+    try:
+        credentials = request_json(vault+'/v1/kv/data/ci/testhttp/shared', headers=headers)['data']['data']
+        if branch == 'develop':
+            credentials.update(request_json(vault+'/v1/kv/data/ci/testhttp/develop', headers=headers)['data']['data'])
+        names = {'infra_ssh_key':'INFRA_SSH_KEY', 'argo_read_token':'ARGO_READ_TOKEN', 'registry_token':'REGISTRY_TOKEN'}
+        for name, value in credentials.items():
+            if name in names:
+                mask(value)
+                os.environ[names[name]] = value
+    finally:
+        request_json(vault+'/v1/auth/token/revoke-self', {}, headers)
 
 
 def run(args, **kwargs):
@@ -109,9 +153,11 @@ def main():
         raise RuntimeError('Delivery is allowed only from this repository develop/main')
     if os.environ.get('GITHUB_EVENT_NAME') not in ('push', 'workflow_dispatch'):
         raise RuntimeError('Untrusted event type')
-    for name in ('REGISTRY_TOKEN', 'INFRA_SSH_KEY', 'ARGO_READ_TOKEN'):
+    fetch_vault_credentials(branch)
+    required = ['INFRA_SSH_KEY', 'ARGO_READ_TOKEN'] + (['REGISTRY_TOKEN'] if branch == 'develop' else [])
+    for name in required:
         if not os.environ.get(name):
-            raise RuntimeError(name + ' must be configured in GitHub Secrets')
+            raise RuntimeError(name + ' must be configured in Vault')
     source_sha = output(['git', 'rev-parse', 'HEAD'])
     if source_sha != os.environ['GITHUB_SHA']:
         raise RuntimeError('Checkout does not match the triggering commit')
@@ -144,7 +190,7 @@ def main():
                  '-e', 'GOMODCACHE=/tmp/go-modules', builder, 'sh', '-ec',
                  'go test ./... && go vet ./...'], env=env)
             tag = REGISTRY+'/images/testhttp:git-'+source_sha
-            run(['docker', 'build', '--label', 'org.opencontainers.image.revision='+source_sha, '-t', tag, '.'], env=env)
+            run(['docker', 'build', '--provenance=false', '--label', 'org.opencontainers.image.revision='+source_sha, '-t', tag, '.'], env=env)
             run(['docker', 'login', REGISTRY, '-u', 'testhttp-pusher', '--password-stdin'],
                 input=os.environ['REGISTRY_TOKEN'].encode(), env=env)
             run(['docker', 'push', tag], env=env)
